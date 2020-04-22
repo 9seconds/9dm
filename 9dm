@@ -2,9 +2,294 @@
 # -*- coding: utf-8 -*-
 # vim: set ft=python et sw=4 ts=8:
 
+import argparse
+import dataclasses
+import enum
+import itertools
+import os
+import pathlib
+import textwrap
+import typing as t
+
+
+@enum.unique
+class CliCommand(enum.Enum):
+    LINK = enum.auto()
+    UNLINK = enum.auto()
+    PRINT = enum.auto()
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class Configuration:
+    cli_options: argparse.Namespace
+
+    @property
+    def debug(self) -> bool:
+        return t.cast(bool, self.cli_options.debug)
+
+    @property
+    def config_dir(self) -> pathlib.Path:
+        return t.cast(pathlib.Path, self.cli_options.config_dir)
+
+    @property
+    def database_file(self) -> pathlib.Path:
+        return self.config_dir.joinpath("db")
+
+    @property
+    def source_dir(self) -> pathlib.Path:
+        return t.cast(pathlib.Path, self.cli_options.source_dir)
+
+    @property
+    def target_dir(self) -> pathlib.Path:
+        return t.cast(pathlib.Path, self.cli_options.target_dir)
+
+    @property
+    def cli_command(self) -> t.Optional[CliCommand]:
+        return t.cast(t.Optional[CliCommand], self.cli_options.command)
+
+    @property
+    def groups(self) -> t.Set[str]:
+        return set(t.cast(t.Sequence[str], self.cli_options.group))
+
+
+@dataclasses.dataclass(frozen=True)
+class Link:
+    source: pathlib.Path
+    destination: pathlib.Path
+
+    def validate(self) -> None:
+        if not self.source.exists():
+            raise ValueError(f"Source path {str(self.source)} does not exist")
+        if not self.destination.exists():
+            return
+        if not self.destination.samefile(self.source):
+            raise ValueError(
+                f"Destination {str(self.destination)} already "
+                "exists and points to another file"
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class Group:
+    name: str
+    path: pathlib.Path
+
+    target_path: dataclasses.InitVar[pathlib.Path]
+
+    links: t.Set[Link] = dataclasses.field(default_factory=set, init=False)
+
+    def __post_init__(self, target_path: pathlib.Path) -> None:
+        if not self.path.exists():
+            raise ValueError(f"Path {str(self.path)} does not exist")
+        if not self.path.is_dir():
+            raise ValueError(f"Path {str(self.path)} is not a directory")
+
+        for root, _, files in os.walk(self.path):
+            root_path = pathlib.Path(root)
+            for filename in files:
+                source_path = root_path.joinpath(filename)
+                relative_path = source_path.relative_to(self.path)
+                destination_path = target_path.joinpath(*relative_path.parts)
+                self.links.add(Link(source_path, destination_path))
+
+
+@dataclasses.dataclass(frozen=True)
+class Tree:
+    path: pathlib.Path
+
+    target_path: dataclasses.InitVar[pathlib.Path]
+    group_names: dataclasses.InitVar[t.Sequence[str]]
+
+    groups: t.Dict[str, Group] = dataclasses.field(
+        default_factory=dict, init=False
+    )
+
+    def __post_init__(
+        self, target_path: pathlib.Path, group_names: t.Sequence[str]
+    ) -> None:
+        if not self.path.exists():
+            raise ValueError(f"Path {self.path} does not exist")
+        if not self.path.is_dir():
+            raise ValueError("Path {self.path} is not a directory")
+
+        for name in group_names:
+            self.groups[name] = Group(
+                name=name,
+                path=self.path.joinpath(name + "_"),
+                target_path=target_path,
+            )
+
+    @property
+    def all_links(self) -> t.Set[Link]:
+        return set(
+            itertools.chain.from_iterable(
+                gr.links for gr in self.groups.values()
+            )
+        )
+
+
+class CliParser:
+    parser: argparse.ArgumentParser
+
+    DESCRIPTION_MAIN = textwrap.dedent(
+        """
+    9seconds' dotfiles manager.
+
+    This is a simple tool which allows to manage symlinks to dotfiles.
+    Please refer to README file at https://github.com/9seconds/9dm to get a
+    detailed description. Here is a short excerpt.
+
+    9dm has source and target. Source is a source directory where symlink
+    groups are placed. Group is a directory with '_' suffix. So, if you want
+    to have `git` group, just name a directory as `git_`. Contents of the
+    group directory is going to be mapped to target by following rules:
+
+    1. Directories are created, not symlinked
+    2. Files are symlinked
+
+    All files or directories with _prefix are going to be created/symlinked
+    with a leading dot. For example, if you have `_config/some/_yaml.file`,
+    then it is going to be symlinked as `.config/some/.yaml.file`. If you
+    really need to have underscore prefix, please do not use this tool for
+    this symlink.
+
+    So, if you have a _gitconfig within a group directory, it is going to be
+    symlinked to `<target>/.gitconfig`.
+    \n
+    9dm tracks past operations in $XDF_CONFIG_HOME/9dm/db (or
+    $HOME/.config/9dm/db) file. It stores target/group mapping there. It is
+    required if you want to remove some stale symlinks or relink some files
+    already managed by 9dm. If 9dm meets a conflict with some unexpected
+    file, it prints and stops it work. It does all validation before
+    performing any operations.
+    """
+    ).strip()
+    DESCRIPTION_LINK = textwrap.dedent(
+        """
+    Link groups. This is a default mode you usually want to use.
+
+    It takes information from source directory and wire target with
+    required symlinks. Also, it tracks dead links and can remove them if
+    necessary.
+
+    Dead links are tracked only within groups you pass.
+    """
+    ).strip()
+    DESCRIPTION_UNLINK = textwrap.dedent(
+        """
+    Unlink groups. The opposite to link. This removes previously created
+    symlinks.
+    """
+    ).strip()
+    DESCRIPTION_PRINT = """This prints a contents of internal database."""
+
+    class HelpFormatter(
+        argparse.RawDescriptionHelpFormatter,
+        argparse.ArgumentDefaultsHelpFormatter,
+    ):
+        pass
+
+    def __init__(self) -> None:
+        self.parser = argparse.ArgumentParser(
+            description=self.DESCRIPTION_MAIN,
+            formatter_class=self.HelpFormatter,
+        )
+        self.parser.add_argument(
+            "-c",
+            "--config-dir",
+            help="Path to directory with app configuration",
+            type=self.validate_dir,
+            default=pathlib.Path(
+                os.getenv(
+                    "XDF_CONFIG_HOME", pathlib.Path.home().joinpath(".config")
+                )
+            ).joinpath("9dm"),
+        )
+        self.parser.add_argument(
+            "-d",
+            "--debug",
+            help="Run in debug mode",
+            action="store_true",
+            default=False,
+        )
+        self.parser.add_argument(
+            "-s",
+            "--source-dir",
+            help="Path to a source dir.",
+            default=os.getcwd(),
+            type=self.validate_dir,
+        )
+        self.parser.add_argument(
+            "-t",
+            "--target_dir",
+            help="A target directory for symlinking.",
+            type=self.validate_dir,
+            default=pathlib.Path.home(),
+        )
+        self.parser.set_defaults(command=None)
+
+        subparsers = self.parser.add_subparsers()
+        link_parser = subparsers.add_parser(
+            "link",
+            help="Link symlink groups",
+            description=self.DESCRIPTION_LINK,
+            formatter_class=self.HelpFormatter,
+        )
+        link_parser.set_defaults(command=CliCommand.LINK)
+
+        unlink_parser = subparsers.add_parser(
+            "unlink",
+            help="Unlink symlink groups",
+            description=self.DESCRIPTION_UNLINK,
+            formatter_class=self.HelpFormatter,
+        )
+        unlink_parser.set_defaults(command=CliCommand.UNLINK)
+
+        print_parser = subparsers.add_parser(
+            "print",
+            help="Print database contents",
+            description=self.DESCRIPTION_PRINT,
+            formatter_class=self.HelpFormatter,
+        )
+        print_parser.set_defaults(command=CliCommand.PRINT)
+
+        for parser in link_parser, unlink_parser, print_parser:
+            parser.add_argument(
+                "group",
+                help=(
+                    "A group to apply. "
+                    "Do not forget to omit trailing underscore"
+                ),
+                nargs="+",
+            )
+
+    def parse(self) -> Configuration:
+        return Configuration(self.parser.parse_args())
+
+    @classmethod
+    def validate_dir(cls, value: str) -> pathlib.Path:
+        try:
+            path = pathlib.Path(value).resolve()
+        except Exception as exc:
+            raise argparse.ArgumentTypeError(
+                f"Incorrect path {value}: {exc}"
+            ) from exc
+
+        if not path.is_dir():
+            raise argparse.ArgumentTypeError(f"Path {value} is not directory")
+
+        return path
+
 
 def main() -> None:
-    return None
+    config = CliParser().parse()
+    tree = Tree(
+        path=config.source_dir,
+        target_path=config.target_dir,
+        group_names=config.groups,
+    )
+    print(tree.all_links)
+    print(tree)
 
 
 if __name__ == "__main__":
