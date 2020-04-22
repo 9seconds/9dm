@@ -106,9 +106,6 @@ flake8-polyfill==1.0.2 \
     --hash=sha256:12be6a34ee3ab795b19ca73505e7b55826d5f6ad7230d31b18e106400169b9e9 \
     --hash=sha256:e44b087597f6da52ec6393a709e7108b2905317d0c0b744cdca6208e670d8eda \
     # via -r dev-requirements.in
-flake8-print==3.1.4 \
-    --hash=sha256:324f9e59a522518daa2461bacd7f82da3c34eb26a4314c2a54bd493f8b394a68 \
-    # via -r dev-requirements.in
 flake8-printf-formatting==1.1.0 \
     --hash=sha256:54971eaeef6f4cea4ce27559377fb4d00a2a0d9790ca46421ba5b0e00ed5e6e4 \
     --hash=sha256:8a07bebb8a93828cc5730be6d0e355776f1d38caf91aa7691c1585f94878f99c \
@@ -131,7 +128,7 @@ flake8-typing-imports==1.9.0 \
 flake8==3.7.9 \
     --hash=sha256:45681a117ecc81e870cbf1262835ae4af5e7a8b08e40b944a8a6e6b895914cfb \
     --hash=sha256:49356e766643ad15072a789a20915d3c91dc89fd313ccd71802303fd67e4deca \
-    # via -r dev-requirements.in, flake8-2020, flake8-absolute-import, flake8-black, flake8-broken-line, flake8-bugbear, flake8-builtins, flake8-comprehensions, flake8-debugger, flake8-eradicate, flake8-executable, flake8-mutable, flake8-polyfill, flake8-print, flake8-printf-formatting, flake8-quotes, flake8-string-format, flake8-tidy-imports, flake8-typing-imports
+    # via -r dev-requirements.in, flake8-2020, flake8-absolute-import, flake8-black, flake8-broken-line, flake8-bugbear, flake8-builtins, flake8-comprehensions, flake8-debugger, flake8-eradicate, flake8-executable, flake8-mutable, flake8-polyfill, flake8-printf-formatting, flake8-quotes, flake8-string-format, flake8-tidy-imports, flake8-typing-imports
 importlib-metadata==1.6.0 \
     --hash=sha256:2a688cbaa90e0cc587f1df48bdc97a6eadccdcd9c35fb3f976a09e3b5016d90f \
     --hash=sha256:34513a8a0c4962bc66d35b359558fd8a5e10cd472d37aec5f66858addef32c1e \
@@ -183,7 +180,7 @@ py==1.8.1 \
 pycodestyle==2.5.0 \
     --hash=sha256:95a2219d12372f05704562a14ec30bc76b05a5b297b21a5dfe3f6fac3491ae56 \
     --hash=sha256:e40a936c9a450ad81df37f549d676d127b1b66000a6c500caa2b085bc0ca976c \
-    # via flake8, flake8-debugger, flake8-import-order, flake8-print
+    # via flake8, flake8-debugger, flake8-import-order
 pyflakes==2.1.1 \
     --hash=sha256:17dbeb2e3f4d772725c777fabc446d5634d1038f234e77343108ce445ea69ce0 \
     --hash=sha256:d976835886f8c5b31d47970ed689944a0262b5f3afa00a5a7b4dc81e5449f8a2 \
@@ -222,7 +219,7 @@ regex==2020.4.4 \
 six==1.14.0 \
     --hash=sha256:236bdbdce46e6e6a3d61a337c0f8b763ca1e8717c03b369e87a7ec7ce1319c0a \
     --hash=sha256:8f3cd2e254d8f793e7f3d6d9df77b92252b52637291d0f0da013c76ea2724b6c \
-    # via flake8-print, packaging, pip-tools, tox, virtualenv
+    # via packaging, pip-tools, tox, virtualenv
 toml==0.10.0 \
     --hash=sha256:229f81c57791a41d65e399fc06bf0848bab550a9dfd5ed66df18ce5f05e73d5c \
     --hash=sha256:235682dd292d5899d361a811df37e04a8828a5b1da3115886b73cf81ebc9100e \

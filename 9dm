@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # vim: set ft=python et sw=4 ts=8:
 
 import argparse
 import dataclasses
 import enum
+import io
 import itertools
+import logging
 import os
 import pathlib
+import sys
 import textwrap
 import typing as t
 
@@ -49,36 +51,71 @@ class Configuration:
 
     @property
     def groups(self) -> t.Set[str]:
-        return set(t.cast(t.Sequence[str], self.cli_options.group))
+        return set(t.cast(t.Iterable[str], self.cli_options.group))
 
 
-@dataclasses.dataclass(frozen=True)
 class Link:
     source: pathlib.Path
     destination: pathlib.Path
 
+    def __init__(
+        self,
+        source: pathlib.Path,
+        *,
+        group_path: pathlib.Path,
+        target_dir: pathlib.Path,
+    ) -> None:
+        self.source = source
+
+        relative_path = self.source.relative_to(group_path)
+        parts = [
+            f".{part[1:]}" if part.startswith("_") else part
+            for part in relative_path.parts
+        ]
+        relative_path = pathlib.Path(parts[0]).joinpath(*parts[1:])
+
+        self.destination = target_dir.joinpath(*relative_path.parts)
+
+    def __eq__(self, another) -> bool:
+        return bool(
+            self.__class__ is another.__class__
+            and self.source == another.source
+            and self.destination == another.destination
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.source, self.destination))
+
+    def __str__(self) -> str:
+        return f"{self.source} -> {self.destination}"
+
+    def __repr__(self) -> str:
+        return f"<Link(source={self.source}, destination={self.destination})>"
+
     def validate(self) -> None:
         if not self.source.exists():
-            raise ValueError(f"Source path {str(self.source)} does not exist")
+            raise ValueError(f"Source path {self.source} does not exist")
         if not self.destination.exists():
             return
         if not self.destination.samefile(self.source):
             raise ValueError(
-                f"Destination {str(self.destination)} already "
+                f"Destination {self.destination} already "
                 "exists and points to another file"
             )
 
 
-@dataclasses.dataclass(frozen=True)
 class Group:
     name: str
     path: pathlib.Path
+    links: t.Set[Link]
 
-    target_path: dataclasses.InitVar[pathlib.Path]
+    def __init__(
+        self, name: str, *, root_path: pathlib.Path, target_dir: pathlib.Path
+    ) -> None:
+        self.name = name
+        self.path = root_path.joinpath(name + "_")
+        self.links = set()
 
-    links: t.Set[Link] = dataclasses.field(default_factory=set, init=False)
-
-    def __post_init__(self, target_path: pathlib.Path) -> None:
         if not self.path.exists():
             raise ValueError(f"Path {str(self.path)} does not exist")
         if not self.path.is_dir():
@@ -87,37 +124,79 @@ class Group:
         for root, _, files in os.walk(self.path):
             root_path = pathlib.Path(root)
             for filename in files:
-                source_path = root_path.joinpath(filename)
-                relative_path = source_path.relative_to(self.path)
-                destination_path = target_path.joinpath(*relative_path.parts)
-                self.links.add(Link(source_path, destination_path))
+                self.links.add(
+                    Link(
+                        source=root_path.joinpath(filename),
+                        group_path=self.path,
+                        target_dir=target_dir,
+                    )
+                )
+
+    def __eq__(self, another) -> bool:
+        return bool(
+            self.__class__ is another.__class__
+            and self.name == another.name
+            and self.links == another.links
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Group(name={self.name}, path={self.path}, links={self.links})>"
+        )
+
+    def __str__(self) -> str:
+        stream = io.StringIO()
+
+        print(f"{self.name} ({self.path}):", file=stream)
+        if self.links:
+            for link in sorted(self.links, key=lambda item: item.source):
+                print(textwrap.indent(str(link), "  "), file=stream)
+        else:
+            print("  Empty", file=stream)
+
+        return stream.getvalue().rstrip()
 
 
-@dataclasses.dataclass(frozen=True)
 class Tree:
     path: pathlib.Path
+    groups: t.Mapping[str, Group]
 
-    target_path: dataclasses.InitVar[pathlib.Path]
-    group_names: dataclasses.InitVar[t.Sequence[str]]
-
-    groups: t.Dict[str, Group] = dataclasses.field(
-        default_factory=dict, init=False
-    )
-
-    def __post_init__(
-        self, target_path: pathlib.Path, group_names: t.Sequence[str]
+    def __init__(
+        self,
+        path: pathlib.Path,
+        *,
+        target_dir: pathlib.Path,
+        groups: t.Iterable[str],
     ) -> None:
-        if not self.path.exists():
-            raise ValueError(f"Path {self.path} does not exist")
-        if not self.path.is_dir():
-            raise ValueError("Path {self.path} is not a directory")
+        if not path.exists():
+            raise ValueError(f"Path {path} does not exist")
+        if not path.is_dir():
+            raise ValueError("Path {path} is not a directory")
 
-        for name in group_names:
-            self.groups[name] = Group(
-                name=name,
-                path=self.path.joinpath(name + "_"),
-                target_path=target_path,
-            )
+        self.path = path
+        self.groups = {
+            name: Group(name, root_path=path, target_dir=target_dir)
+            for name in groups
+        }
+
+    def __eq__(self, another) -> bool:
+        return bool(
+            self.__class__ is another.__class__
+            and self.path == another.path
+            and self.groups == another.groups
+        )
+
+    def __str__(self) -> str:
+        stream = io.StringIO()
+
+        print(f"{self.path}:", file=stream)
+        if self.groups:
+            for _, group in sorted(self.groups.items()):
+                print(textwrap.indent(str(group), "  "), file=stream)
+        else:
+            print("  Empty", file=stream)
+
+        return stream.getvalue().rstrip()
 
     @property
     def all_links(self) -> t.Set[Link]:
@@ -283,11 +362,24 @@ class CliParser:
 
 def main() -> None:
     config = CliParser().parse()
-    tree = Tree(
-        path=config.source_dir,
-        target_path=config.target_dir,
-        group_names=config.groups,
-    )
+
+    if config.debug:
+        logging.basicConfig(format="%(message)s", level=logging.DEBUG)
+    else:
+        logging.basicConfig(format="%(message)s", level=logging.INFO)
+
+    logging.debug("Configuration: %s", config)
+
+    try:
+        tree = Tree(
+            path=config.source_dir,
+            target_dir=config.target_dir,
+            groups=config.groups,
+        )
+    except Exception as exc:
+        logging.info("error: %s", exc)
+        sys.exit(1)
+
     print(tree.all_links)
     print(tree)
 
