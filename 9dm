@@ -200,7 +200,7 @@ class Group:
 
 class Tree:
     path: pathlib.Path
-    groups: t.Mapping[str, Group]
+    groups: t.Dict[str, Group]
 
     def __init__(
         self,
@@ -641,7 +641,7 @@ def main() -> None:
     if not config.cli_command:
         sys.exit("Please provide a command to use")
 
-    with contextlib.closing(config.cli_command(config)) as command:
+    with contextlib.closing(config.cli_command(config)) as command:  # type: ignore
         command.run()
 
 
