@@ -2,6 +2,7 @@
 # vim: set ft=python et sw=4 ts=8:
 
 import argparse
+import contextlib
 import enum
 import io
 import itertools
@@ -9,7 +10,6 @@ import logging
 import os
 import pathlib
 import shelve
-import shutil
 import sys
 import textwrap
 import typing as t
@@ -97,7 +97,6 @@ class LinkConfiguration:
 class Link:
     source: pathlib.Path
     destination: pathlib.Path
-    target_dir: pathlib.Path
 
     def __init__(
         self,
@@ -107,7 +106,6 @@ class Link:
         target_dir: pathlib.Path,
     ) -> None:
         self.source = source
-        self.target_dir = target_dir
 
         relative_path = self.source.relative_to(group_path)
         parts = [
@@ -133,37 +131,6 @@ class Link:
 
     def __repr__(self) -> str:
         return f"<Link(source={self.source}, destination={self.destination})>"
-
-    def validate(self) -> None:
-        if not self.source.exists():
-            raise ValueError(f"Source path {self.source} does not exist")
-        if not self.destination.exists():
-            return
-        if not self.destination.samefile(self.source):
-            raise ValueError(
-                f"Destination {self.destination} already "
-                "exists and points to another file"
-            )
-
-    def make(self) -> None:
-        self.unmake()
-        self.destination.parent.mkdir(parents=True, exist_ok=True)
-        self.destination.symlink_to(self.source)
-
-    def unmake(self, clean_empty_directories: bool = False) -> None:
-        try:
-            self.destination.unlink()
-        except FileNotFoundError:
-            pass
-
-        directory = self.destination.parent
-        while (
-            clean_empty_directories
-            and directory != self.target_dir
-            and not list(directory.iterdir())
-        ):
-            shutil.rmtree(str(directory))
-            directory = directory.parent
 
 
 class Group:
@@ -270,6 +237,51 @@ class Tree:
                 gr.links for gr in self.groups.values()
             )
         )
+
+
+class FileSystem:
+    topdir: pathlib.Path
+
+    def __init__(self, top_directory: pathlib.Path) -> None:
+        self.topdir = top_directory
+
+    def validate_link(self, obj: Link) -> None:
+        if not obj.source.exists():
+            raise ValueError(f"Source path {obj.source} does not exist")
+
+        if not obj.destination.exists():
+            return
+
+        if not obj.destination.samefile(obj.source):
+            raise ValueError(
+                f"Destination {obj.destination} already "
+                "exists and points to another file"
+            )
+
+    def link(self, obj: Link) -> None:
+        if obj.destination.exists():
+            self.unlink(obj)
+
+        obj.destination.parent.mkdir(parents=True, exist_ok=True)
+        obj.destination.symlink_to(obj.source)
+
+    def unlink(self, obj: Link) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            obj.destination.unlink()
+
+    def clean_directories(self, links: t.Iterable[Link]) -> None:
+        paths = sorted(
+            (link.destination.parent for link in links),
+            key=lambda item: len(os.fspath(item)),
+            reverse=True,
+        )
+
+        for path in paths:
+            current_path = path
+            while current_path != self.topdir and list(current_path.iterdir()):
+                logging.debug("Remove directory %s", os.fspath(current_path))
+                current_path.rmdir()
+                current_path = current_path.parent
 
 
 class CliParser:
@@ -487,6 +499,7 @@ def main_print(config: Configuration) -> None:
 
 def main_link(config: Configuration) -> None:  # noqa
     link_config = config.link_configuration
+    fs = FileSystem(config.target_dir)
 
     try:
         current_tree = Tree(
@@ -510,17 +523,18 @@ def main_link(config: Configuration) -> None:  # noqa
 
         for link in links_to_create:
             try:
-                link.validate()
-                logging.debug("Link %s is valid", link)
+                fs.validate_link(link)
             except Exception as exc:
                 logging.debug("Link %s is invalid: %s", link, exc)
                 if not link_config.force:
                     sys.exit(f"validation error for link {link}: {exc}")
+            else:
+                logging.debug("Link %s is valid", link)
 
         for link in links_to_create:
             try:
                 if not link_config.dry_run:
-                    link.make()
+                    fs.link(link)
                 logging.info(f"Create link {link}")
             except Exception as exc:
                 sys.exit(f"error fo link {link}: {exc}")
@@ -529,10 +543,13 @@ def main_link(config: Configuration) -> None:  # noqa
             for link in links_to_remove:
                 try:
                     if not link_config.dry_run:
-                        link.unmake(link_config.clean_empty_directories)
+                        fs.unlink(link)
                     logging.info("Removed link %s", link)
                 except Exception as exc:
                     sys.exit(f"error fo unmake link {link}: {exc}")
+
+            if link_config.clean_empty_directories:
+                fs.clean_directories(links_to_remove)
 
         db[config.database_key] = current_tree
 
