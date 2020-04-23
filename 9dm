@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # vim: set ft=python et sw=4 ts=8:
 
+import abc
 import argparse
 import contextlib
-import enum
 import io
 import itertools
 import logging
@@ -13,13 +13,6 @@ import shelve
 import sys
 import textwrap
 import typing as t
-
-
-@enum.unique
-class CliCommand(enum.Enum):
-    LINK = enum.auto()
-    UNLINK = enum.auto()
-    PRINT = enum.auto()
 
 
 class Configuration:
@@ -59,8 +52,8 @@ class Configuration:
         return t.cast(pathlib.Path, self.cli_options.target_dir)
 
     @property
-    def cli_command(self) -> t.Optional[CliCommand]:
-        return t.cast(t.Optional[CliCommand], self.cli_options.command)
+    def cli_command(self) -> t.Optional["Command"]:
+        return t.cast(t.Optional[Command], self.cli_options.command)
 
     @property
     def groups(self) -> t.Set[str]:
@@ -284,6 +277,115 @@ class FileSystem:
                 current_path = current_path.parent
 
 
+class Command(metaclass=abc.ABCMeta):
+    config: Configuration
+    shelf: shelve.Shelf
+    fs: FileSystem
+
+    def __init__(self, config: Configuration) -> None:
+        self.config = config
+        self.shelf = shelve.open(str(self.config.database_file))
+        self.fs = FileSystem(self.config.target_dir)
+
+    def close(self) -> None:
+        self.shelf.close()
+
+    def get_current_tree(self) -> Tree:
+        return Tree(
+            path=self.config.source_dir,
+            target_dir=self.config.target_dir,
+            groups=self.config.groups,
+        )
+
+    def get_db_tree(self) -> Tree:
+        return self.shelf.get(
+            self.config.database_key,
+            Tree(
+                path=self.config.source_dir,
+                target_dir=self.config.target_dir,
+                groups=[],
+            ),
+        )
+
+    @abc.abstractmethod
+    def run(self) -> None:
+        raise NotImplementedError()
+
+
+class PrintCommand(Command):
+    def run(self) -> None:
+        if self.config.database_key not in self.shelf:
+            print("Nothing is created yet.")
+        else:
+            print(str(self.get_db_tree()))
+
+
+class LinkCommand(Command):
+    @property
+    def link_config(self) -> LinkConfiguration:
+        return self.config.link_configuration
+
+    def run(self) -> None:
+        try:
+            current_tree = self.get_current_tree()
+        except Exception as exc:
+            sys.exit(f"making current tree error: {exc}")
+
+        db_tree = self.get_db_tree()
+        links_to_create = current_tree.all_links - db_tree.all_links
+        links_to_remove = db_tree.all_links - current_tree.all_links
+
+        self.validate_links(links_to_create)
+        self.create_links(links_to_create)
+
+        if self.link_config.gc:
+            self.gc(links_to_remove)
+
+        # self.shelf[self.config.database_key] = current_tree
+
+    def validate_links(self, links: t.Set[Link]) -> None:
+        for link in links:
+            try:
+                self.fs.validate_link(link)
+            except Exception as exc:
+                logging.debug("Link %s is invalid: %s", link, exc)
+                if not self.link_config.force:
+                    sys.exit(f"validation error for link {link}: {exc}")
+            else:
+                logging.debug("Link %s is valid", link)
+
+    def create_links(self, links: t.Set[Link]) -> None:
+        for link in links:
+            try:
+                if not self.link_config.dry_run:
+                    self.fs.link(link)
+                logging.info(f"Create link {link}")
+            except Exception as exc:
+                sys.exit(f"error fo link {link}: {exc}")
+
+    def gc(self, links: t.Set[Link]) -> None:
+        for link in links:
+            try:
+                if not self.link_config.dry_run:
+                    self.fs.unlink(link)
+                logging.info("Removed link %s", link)
+            except Exception as exc:
+                sys.exit(f"error fo unmake link {link}: {exc}")
+
+        if self.link_config.clean_empty_directories:
+            self.fs.clean_directories(links)
+
+
+class UnlinkCommand(LinkCommand):
+    def run(self) -> None:
+        db_tree = self.get_db_tree()
+
+        links_to_delete: t.Set[Link] = set()
+        for key in self.config.groups:
+            if key in db_tree.groups:
+                links_to_delete |= db_tree.groups.pop(key).links
+
+
 class CliParser:
     parser: argparse.ArgumentParser
 
@@ -422,7 +524,7 @@ class CliParser:
             action="store_true",
             default=False,
         )
-        link_parser.set_defaults(command=CliCommand.LINK)
+        link_parser.set_defaults(command=LinkCommand)
 
         unlink_parser = subparsers.add_parser(
             "unlink",
@@ -430,7 +532,21 @@ class CliParser:
             description=self.DESCRIPTION_UNLINK,
             formatter_class=self.HelpFormatter,
         )
-        unlink_parser.set_defaults(command=CliCommand.UNLINK)
+        unlink_parser.add_argument(
+            "-e",
+            "--no-clean-empty-directories",
+            help="Do not clean empty directories after garbage collection",
+            action="store_true",
+            default=False,
+        )
+        unlink_parser.add_argument(
+            "-r",
+            "--dry-run",
+            help="Dry run",
+            action="store_true",
+            default=False,
+        )
+        unlink_parser.set_defaults(command=UnlinkCommand)
 
         print_parser = subparsers.add_parser(
             "print",
@@ -438,7 +554,7 @@ class CliParser:
             description=self.DESCRIPTION_PRINT,
             formatter_class=self.HelpFormatter,
         )
-        print_parser.set_defaults(command=CliCommand.PRINT)
+        print_parser.set_defaults(command=PrintCommand)
 
         for parser in link_parser, unlink_parser:
             parser.add_argument(
@@ -479,83 +595,11 @@ def main() -> None:
     logging.debug("Configuration: %s", config)
 
     config.config_dir.mkdir(parents=True, exist_ok=True)
-    if config.cli_command is CliCommand.PRINT:
-        main_print(config)
-    elif config.cli_command is CliCommand.LINK:
-        main_link(config)
-    elif config.cli_command is CliCommand.UNLINK:
-        main_unlink(config)
-    else:
+    if not config.cli_command:
         sys.exit("Please provide a command to use")
 
-
-def main_print(config: Configuration) -> None:
-    with shelve.open(str(config.database_file)) as db:
-        if config.database_key not in db:
-            print("Nothing is created yet")
-        else:
-            print(str(db[config.database_key]))
-
-
-def main_link(config: Configuration) -> None:  # noqa
-    link_config = config.link_configuration
-    fs = FileSystem(config.target_dir)
-
-    try:
-        current_tree = Tree(
-            path=config.source_dir,
-            target_dir=config.target_dir,
-            groups=config.groups,
-        )
-    except Exception as exc:
-        sys.exit(f"error: {exc}")
-
-    with shelve.open(str(config.database_file)) as db:
-        dbtree = db.get(
-            config.database_key,
-            Tree(
-                path=config.source_dir, target_dir=config.target_dir, groups=[]
-            ),
-        )
-
-        links_to_create = current_tree.all_links - dbtree.all_links
-        links_to_remove = dbtree.all_links - current_tree.all_links
-
-        for link in links_to_create:
-            try:
-                fs.validate_link(link)
-            except Exception as exc:
-                logging.debug("Link %s is invalid: %s", link, exc)
-                if not link_config.force:
-                    sys.exit(f"validation error for link {link}: {exc}")
-            else:
-                logging.debug("Link %s is valid", link)
-
-        for link in links_to_create:
-            try:
-                if not link_config.dry_run:
-                    fs.link(link)
-                logging.info(f"Create link {link}")
-            except Exception as exc:
-                sys.exit(f"error fo link {link}: {exc}")
-
-        if link_config.gc:
-            for link in links_to_remove:
-                try:
-                    if not link_config.dry_run:
-                        fs.unlink(link)
-                    logging.info("Removed link %s", link)
-                except Exception as exc:
-                    sys.exit(f"error fo unmake link {link}: {exc}")
-
-            if link_config.clean_empty_directories:
-                fs.clean_directories(links_to_remove)
-
-        db[config.database_key] = current_tree
-
-
-def main_unlink(config: Configuration) -> None:
-    pass
+    with contextlib.closing(config.cli_command(config)) as command:
+        command.run()
 
 
 if __name__ == "__main__":
