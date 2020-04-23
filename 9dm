@@ -63,11 +63,15 @@ class Configuration:
     def link_configuration(self) -> "LinkConfiguration":
         return LinkConfiguration(self.cli_options)
 
+    @property
+    def unlink_configuration(self) -> "UnlinkConfiguration":
+        return UnlinkConfiguration(self.cli_options)
+
 
 class LinkConfiguration:
     cli_options: argparse.Namespace
 
-    def __init__(self, cli_options: argparse.Namespace):
+    def __init__(self, cli_options: argparse.Namespace) -> None:
         self.cli_options = cli_options
 
     @property
@@ -85,6 +89,21 @@ class LinkConfiguration:
     @property
     def force(self) -> bool:
         return t.cast(bool, self.cli_options.force)
+
+
+class UnlinkConfiguration:
+    cli_options: argparse.Namespace
+
+    def __init__(self, cli_options: argparse.Namespace) -> None:
+        self.cli_options = cli_options
+
+    @property
+    def dry_run(self) -> bool:
+        return t.cast(bool, self.cli_options.dry_run)
+
+    @property
+    def clean_empty_directories(self) -> bool:
+        return t.cast(bool, not self.cli_options.no_clean_empty_directories)
 
 
 class Link:
@@ -264,17 +283,21 @@ class FileSystem:
 
     def clean_directories(self, links: t.Iterable[Link]) -> None:
         paths = sorted(
-            (link.destination.parent for link in links),
+            {link.destination.parent for link in links},
             key=lambda item: len(os.fspath(item)),
             reverse=True,
         )
 
         for path in paths:
-            current_path = path
-            while current_path != self.topdir and list(current_path.iterdir()):
-                logging.debug("Remove directory %s", os.fspath(current_path))
-                current_path.rmdir()
-                current_path = current_path.parent
+            current = path
+            while (
+                current.exists()
+                and current != self.topdir
+                and not list(current.iterdir())
+            ):
+                logging.debug("Remove directory %s", os.fspath(current))
+                current.rmdir()
+                current = current.parent
 
 
 class Command(metaclass=abc.ABCMeta):
@@ -341,7 +364,7 @@ class LinkCommand(Command):
         if self.link_config.gc:
             self.gc(links_to_remove)
 
-        # self.shelf[self.config.database_key] = current_tree
+        self.shelf[self.config.database_key] = current_tree
 
     def validate_links(self, links: t.Set[Link]) -> None:
         for link in links:
@@ -377,6 +400,10 @@ class LinkCommand(Command):
 
 
 class UnlinkCommand(LinkCommand):
+    @property
+    def unlink_config(self) -> UnlinkConfiguration:
+        return self.config.unlink_configuration
+
     def run(self) -> None:
         db_tree = self.get_db_tree()
 
@@ -384,6 +411,22 @@ class UnlinkCommand(LinkCommand):
         for key in self.config.groups:
             if key in db_tree.groups:
                 links_to_delete |= db_tree.groups.pop(key).links
+
+        self.gc(links_to_delete)
+
+        self.shelf[self.config.database_key] = db_tree
+
+    def gc(self, links: t.Set[Link]) -> None:
+        for link in links:
+            try:
+                if not self.unlink_config.dry_run:
+                    self.fs.unlink(link)
+                logging.info("Removed link %s", link)
+            except Exception as exc:
+                sys.exit(f"error fo unmake link {link}: {exc}")
+
+        if self.unlink_config.clean_empty_directories:
+            self.fs.clean_directories(links)
 
 
 class CliParser:
