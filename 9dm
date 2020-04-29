@@ -15,25 +15,48 @@ import textwrap
 import typing as t
 
 
-class Configuration:
-    cli_options: argparse.Namespace
-
-    def __init__(self, cli_options: argparse.Namespace) -> None:
-        self.cli_options = cli_options
+class Base:
+    def __repr__(self) -> str:
+        internals = ", ".join(
+            f"{k}={v}" for k, v in sorted(self.__dict__.items())
+        )
+        return f"<{self.__class__.__name__}({internals})>"
 
     def __str__(self) -> str:
-        return str(self.cli_options)
+        return repr(self)
 
-    def __repr__(self) -> str:
-        return repr(self.cli_options)
+    def __eq__(self, obj) -> bool:
+        return (
+            self.__class__ is obj.__class__ and self.__dict__ == obj.__dict__
+        )
 
-    @property
-    def debug(self) -> bool:
-        return t.cast(bool, self.cli_options.debug)
 
-    @property
-    def config_dir(self) -> pathlib.Path:
-        return t.cast(pathlib.Path, self.cli_options.config_dir)
+class Configuration(Base):
+    debug: bool
+    config_dir: pathlib.Path
+    source_dir: pathlib.Path
+    target_dir: pathlib.Path
+    command: "Command"
+    groups: t.Set[str]
+    dry_run: bool
+    gc: bool
+    clean_empty_directories: bool
+
+    def __init__(self, cli_options: argparse.Namespace) -> None:
+        self.debug = t.cast(bool, cli_options.debug)
+        self.config_dir = t.cast(pathlib.Path, cli_options.config_dir)
+        self.source_dir = t.cast(pathlib.Path, cli_options.source_dir)
+        self.target_dir = t.cast(pathlib.Path, cli_options.target_dir)
+        self.command = t.cast("Command", cli_options.command)
+        self.groups = set(
+            t.cast(t.Iterable[str], getattr(cli_options, "group", []))
+        )
+        self.dry_run = t.cast(bool, getattr(cli_options, "dry_run", False))
+        self.gc = not t.cast(bool, getattr(cli_options, "no_gc", False))
+        self.clean_empty_directories = not t.cast(
+            bool, getattr(cli_options, "no_clean_empty_directories", False)
+        )
+        self.force = t.cast(bool, getattr(cli_options, "force", False))
 
     @property
     def database_file(self) -> pathlib.Path:
@@ -41,72 +64,10 @@ class Configuration:
 
     @property
     def database_key(self) -> str:
-        return str(self.source_dir)
-
-    @property
-    def source_dir(self) -> pathlib.Path:
-        return t.cast(pathlib.Path, self.cli_options.source_dir)
-
-    @property
-    def target_dir(self) -> pathlib.Path:
-        return t.cast(pathlib.Path, self.cli_options.target_dir)
-
-    @property
-    def cli_command(self) -> t.Optional["Command"]:
-        return t.cast(t.Optional[Command], self.cli_options.command)
-
-    @property
-    def groups(self) -> t.Set[str]:
-        return set(t.cast(t.Iterable[str], self.cli_options.group))
-
-    @property
-    def link_configuration(self) -> "LinkConfiguration":
-        return LinkConfiguration(self.cli_options)
-
-    @property
-    def unlink_configuration(self) -> "UnlinkConfiguration":
-        return UnlinkConfiguration(self.cli_options)
+        return os.fspath(self.source_dir)
 
 
-class LinkConfiguration:
-    cli_options: argparse.Namespace
-
-    def __init__(self, cli_options: argparse.Namespace) -> None:
-        self.cli_options = cli_options
-
-    @property
-    def dry_run(self) -> bool:
-        return t.cast(bool, self.cli_options.dry_run)
-
-    @property
-    def gc(self) -> bool:
-        return t.cast(bool, not self.cli_options.no_gc)
-
-    @property
-    def clean_empty_directories(self) -> bool:
-        return t.cast(bool, not self.cli_options.no_clean_empty_directories)
-
-    @property
-    def force(self) -> bool:
-        return t.cast(bool, self.cli_options.force)
-
-
-class UnlinkConfiguration:
-    cli_options: argparse.Namespace
-
-    def __init__(self, cli_options: argparse.Namespace) -> None:
-        self.cli_options = cli_options
-
-    @property
-    def dry_run(self) -> bool:
-        return t.cast(bool, self.cli_options.dry_run)
-
-    @property
-    def clean_empty_directories(self) -> bool:
-        return t.cast(bool, not self.cli_options.no_clean_empty_directories)
-
-
-class Link:
+class Link(Base):
     source: pathlib.Path
     destination: pathlib.Path
 
@@ -117,35 +78,24 @@ class Link:
         group_path: pathlib.Path,
         target_dir: pathlib.Path,
     ) -> None:
-        self.source = source
-
-        relative_path = self.source.relative_to(group_path)
+        relative_path = source.relative_to(group_path)
         parts = [
             f".{part[1:]}" if part.startswith("_") else part
             for part in relative_path.parts
         ]
         relative_path = pathlib.Path(parts[0]).joinpath(*parts[1:])
 
+        self.source = source
         self.destination = target_dir.joinpath(*relative_path.parts)
-
-    def __eq__(self, another) -> bool:
-        return bool(
-            self.__class__ is another.__class__
-            and self.source == another.source
-            and self.destination == another.destination
-        )
 
     def __hash__(self) -> int:
         return hash((self.source, self.destination))
 
     def __str__(self) -> str:
-        return f"{self.source} -> {self.destination}"
-
-    def __repr__(self) -> str:
-        return f"<Link(source={self.source}, destination={self.destination})>"
+        return f"{self.source} → {self.destination}"
 
 
-class Group:
+class Group(Base):
     name: str
     path: pathlib.Path
     links: t.Set[Link]
@@ -173,18 +123,6 @@ class Group:
                     )
                 )
 
-    def __eq__(self, another) -> bool:
-        return bool(
-            self.__class__ is another.__class__
-            and self.name == another.name
-            and self.links == another.links
-        )
-
-    def __repr__(self) -> str:
-        return (
-            f"<Group(name={self.name}, path={self.path}, links={self.links})>"
-        )
-
     def __str__(self) -> str:
         stream = io.StringIO()
 
@@ -198,7 +136,7 @@ class Group:
         return stream.getvalue().rstrip()
 
 
-class Tree:
+class Tree(Base):
     path: pathlib.Path
     groups: t.Dict[str, Group]
 
@@ -220,13 +158,6 @@ class Tree:
             for name in groups
         }
 
-    def __eq__(self, another) -> bool:
-        return bool(
-            self.__class__ is another.__class__
-            and self.path == another.path
-            and self.groups == another.groups
-        )
-
     def __str__(self) -> str:
         stream = io.StringIO()
 
@@ -239,9 +170,6 @@ class Tree:
 
         return stream.getvalue().rstrip()
 
-    def __repr__(self) -> str:
-        return f"<Tree(path={self.path}, group={self.groups})>"
-
     @property
     def all_links(self) -> t.Set[Link]:
         return set(
@@ -251,7 +179,7 @@ class Tree:
         )
 
 
-class FileSystem:
+class FileSystem(Base):
     topdir: pathlib.Path
 
     def __init__(self, top_directory: pathlib.Path) -> None:
@@ -300,7 +228,7 @@ class FileSystem:
                 current = current.parent
 
 
-class Command(metaclass=abc.ABCMeta):
+class Command(Base, metaclass=abc.ABCMeta):
     config: Configuration
     shelf: shelve.Shelf
     fs: FileSystem
@@ -335,6 +263,11 @@ class Command(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
 
+class NoCommand(Command):
+    def run(self) -> None:
+        sys.exit("No command is defined")
+
+
 class PrintCommand(Command):
     def run(self) -> None:
         if self.config.database_key not in self.shelf:
@@ -344,10 +277,6 @@ class PrintCommand(Command):
 
 
 class LinkCommand(Command):
-    @property
-    def link_config(self) -> LinkConfiguration:
-        return self.config.link_configuration
-
     def run(self) -> None:
         try:
             current_tree = self.get_current_tree()
@@ -361,7 +290,7 @@ class LinkCommand(Command):
         self.validate_links(links_to_create)
         self.create_links(links_to_create)
 
-        if self.link_config.gc:
+        if self.config.gc:
             self.gc(links_to_remove)
 
         self.shelf[self.config.database_key] = current_tree
@@ -372,7 +301,7 @@ class LinkCommand(Command):
                 self.fs.validate_link(link)
             except Exception as exc:
                 logging.debug("Link %s is invalid: %s", link, exc)
-                if not self.link_config.force:
+                if not self.config.force:
                     sys.exit(f"validation error for link {link}: {exc}")
             else:
                 logging.debug("Link %s is valid", link)
@@ -380,7 +309,7 @@ class LinkCommand(Command):
     def create_links(self, links: t.Set[Link]) -> None:
         for link in links:
             try:
-                if not self.link_config.dry_run:
+                if not self.config.dry_run:
                     self.fs.link(link)
                 logging.info(f"Create link {link}")
             except Exception as exc:
@@ -389,21 +318,17 @@ class LinkCommand(Command):
     def gc(self, links: t.Set[Link]) -> None:
         for link in links:
             try:
-                if not self.link_config.dry_run:
+                if not self.config.dry_run:
                     self.fs.unlink(link)
                 logging.info("Removed link %s", link)
             except Exception as exc:
                 sys.exit(f"error fo unmake link {link}: {exc}")
 
-        if self.link_config.clean_empty_directories:
+        if self.config.clean_empty_directories:
             self.fs.clean_directories(links)
 
 
 class UnlinkCommand(LinkCommand):
-    @property
-    def unlink_config(self) -> UnlinkConfiguration:
-        return self.config.unlink_configuration
-
     def run(self) -> None:
         db_tree = self.get_db_tree()
 
@@ -413,20 +338,7 @@ class UnlinkCommand(LinkCommand):
                 links_to_delete |= db_tree.groups.pop(key).links
 
         self.gc(links_to_delete)
-
         self.shelf[self.config.database_key] = db_tree
-
-    def gc(self, links: t.Set[Link]) -> None:
-        for link in links:
-            try:
-                if not self.unlink_config.dry_run:
-                    self.fs.unlink(link)
-                logging.info("Removed link %s", link)
-            except Exception as exc:
-                sys.exit(f"error fo unmake link {link}: {exc}")
-
-        if self.unlink_config.clean_empty_directories:
-            self.fs.clean_directories(links)
 
 
 class CliParser:
@@ -527,7 +439,7 @@ class CliParser:
             type=self.validate_dir,
             default=pathlib.Path.home(),
         )
-        self.parser.set_defaults(command=None)
+        self.parser.set_defaults(command=NoCommand)
 
         subparsers = self.parser.add_subparsers()
         link_parser = subparsers.add_parser(
@@ -638,10 +550,7 @@ def main() -> None:
     logging.debug("Configuration: %s", config)
 
     config.config_dir.mkdir(parents=True, exist_ok=True)
-    if not config.cli_command:
-        sys.exit("Please provide a command to use")
-
-    with contextlib.closing(config.cli_command(config)) as command:  # type: ignore
+    with contextlib.closing(config.command(config)) as command:  # type: ignore
         command.run()
 
 
